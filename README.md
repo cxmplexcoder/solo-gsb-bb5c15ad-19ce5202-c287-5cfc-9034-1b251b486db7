@@ -1,6 +1,6 @@
 # 封签链校验 API（Seal Chain Validation）
 
-用于展品运输交接场景的封签链校验服务。客户端提交按时间排列的 **封装 / 交接 / 开封 / 重封** 事件序列，服务按状态机逐事件校验，返回最终保管人、当前封签、逐事件状态及全部违规事件的位置与原因；同时提供**批量封签占用检查**接口，对多条事件链做跨链 `seal_id` 占用冲突检测；提供**离线片段合并重建**接口，将同一 `chain_id` 的多个离线片段按 `event_id` 去重、按 `prev_event_id` 重建唯一序列后再校验；提供**开封暴露审计**接口，以有效开封 / 重封事件推导开封区间，相对授权开窗窗口做区间差，输出未授权暴露时长；提供**交接计划符合性审计**接口，把有效封装 / 重封 / 交接事件提取为实际到任记录，与按序计划节点做保管人相同、顺序不交叉的全局最优匹配；提供**温控责任审计**接口，以有效封装 / 重封 / 交接事件生成保管人半开区间，把按前值保持得到的越界温度区间与保管人区间求交、跨交接点拆分，按保管人汇总高温 / 低温秒数、最大偏差与未归属时长；提供**分段校验**接口，把超长事件链拆成若干段依次校验，段间通过带签名的续传令牌传递状态机状态，结果与整链一次校验完全一致；提供**封签库存分配规划**接口，复用批量校验排除已占用编号后，在"未过期且保管人允许"的候选边上做一对一全局最优分配（最大化满足记录数、最小化过期余量总秒数、按待用记录输入顺序与封签编号字典序确定唯一方案）；并提供**污染传播溯源**接口，以各链有效事件生成保管人持有区间，把同一保管人名下的跨链区间重叠识别为接触，从污染源出发按"源已污染且接触仍在持续的最早时刻"级联计算每条链的最早污染时刻、直接来源与完整传播路径；并提供**保管容量并发审计**接口，以各链有效事件生成截至 `audit_until` 的保管人半开持有区间，按保管人扫描区间起止边界（同刻先结束后开始）统计并发链数，合并相邻且活跃链集合相同的超限段，输出超限分段与各保管人超限秒数、并发峰值。
+用于展品运输交接场景的封签链校验服务。客户端提交按时间排列的 **封装 / 交接 / 开封 / 重封** 事件序列，服务按状态机逐事件校验，返回最终保管人、当前封签、逐事件状态及全部违规事件的位置与原因；同时提供**批量封签占用检查**接口，对多条事件链做跨链 `seal_id` 占用冲突检测；提供**离线片段合并重建**接口，将同一 `chain_id` 的多个离线片段按 `event_id` 去重、按 `prev_event_id` 重建唯一序列后再校验；提供**开封暴露审计**接口，以有效开封 / 重封事件推导开封区间，相对授权开窗窗口做区间差，输出未授权暴露时长；提供**交接计划符合性审计**接口，把有效封装 / 重封 / 交接事件提取为实际到任记录，与按序计划节点做保管人相同、顺序不交叉的全局最优匹配；提供**温控责任审计**接口，以有效封装 / 重封 / 交接事件生成保管人半开区间，把按前值保持得到的越界温度区间与保管人区间求交、跨交接点拆分，按保管人汇总高温 / 低温秒数、最大偏差与未归属时长；提供**分段校验**接口，把超长事件链拆成若干段依次校验，段间通过带签名的续传令牌传递状态机状态，结果与整链一次校验完全一致；提供**封签库存分配规划**接口，复用批量校验排除已占用编号后，在"未过期且保管人允许"的候选边上做一对一全局最优分配（最大化满足记录数、最小化过期余量总秒数、按待用记录输入顺序与封签编号字典序确定唯一方案）；并提供**污染传播溯源**接口，以各链有效事件生成保管人持有区间，把同一保管人名下的跨链区间重叠识别为接触，从污染源出发按"源已污染且接触仍在持续的最早时刻"级联计算每条链的最早污染时刻、直接来源与完整传播路径；并提供**保管容量并发审计**接口，以各链有效事件生成截至 `audit_until` 的保管人半开持有区间，按保管人扫描区间起止边界（同刻先结束后开始）统计并发链数，合并相邻且活跃链集合相同的超限段，输出超限分段与各保管人超限秒数、并发峰值；并提供**保管计费试算**接口，以单链有效事件生成截至 `settlement_until` 的保管人半开区间，按各保管人互不重叠的生效费率窗口将区间按费率边界切分，逐段给出秒数、适用的每小时十进制费率与未舍入金额，无覆盖费率的时段列入 `unpriced`，各保管人分段金额精确求和后按 ROUND_HALF_UP 舍入到分，`total` 由已舍入小计相加。
 
 ## 校验规则（状态机）
 
@@ -1094,6 +1094,120 @@ curl -s http://localhost:8000/api/v1/seal-chain/custody-capacity-audit \
 #                "chain_ids": ["chain-a", "chain-b"]}
 ```
 
+### `POST /api/v1/seal-chain/custody-fee-quote`
+
+保管计费试算。在单链状态机校验的基础上，回答"**截至结算时点，各保管人应计多少保管费**"。处理分四步：
+
+1. **调用现有单链校验器**，响应中原样保留 `validation`（结构同 `/validate`）；
+2. **生成保管区间**：仅以 `validation.events` 中 `status = ok` 的 **seal / reseal / handover** 事件——每个有效事件以其时间戳开启对应保管人的半开区间 `[start, end)`，下一个有效事件闭合前一区间，末个区间向右延伸至 `settlement_until`；unseal 不改变保管人，违规事件一律不产生区间，与 `settlement_until` 重合的零长度区间丢弃；
+3. **按费率边界切分**：请求按保管人提供**互不重叠**（允许首尾相接，可乱序）的半开生效费率窗口 `[effective_from, effective_to)` 与**每小时十进制费率** `hourly_rate`；将每个保管区间按该保管人的费率窗口边界切分，命中窗口的分段逐段返回秒数、适用费率与**未舍入金额**（`seconds / 3600 × hourly_rate`，十进制精确计算）；无任何费率窗口覆盖的分段列入 `unpriced`；
+4. **精确汇总**：每位保管人的分段金额先以精确有理数求和，再按 **`ROUND_HALF_UP` 舍入到分**（0.01）；`total` 由各保管人**已舍入小计直接相加**（不再二次舍入），因此可能与逐段舍入后相加不同。
+
+- `rates[]`：按保管人列出的费率窗口集合，`custodian` 不可重复（重复返回 `422`），允许空列表（全部时段均 `unpriced`）；未在 `rates` 中出现的保管人，其全部保管时段计入 `unpriced`，但小计仍以 `0.00` 列出。
+- `windows[]`：同一保管人的生效费率窗口，`effective_from` 必须严格早于 `effective_to`，窗口之间不得有正长度重叠（首尾相接允许，相接点两侧费率各自生效）；窗口可超出保管区间或结算时点，计费分段一律截断到 `[保管区间起点, 保管区间终点]`。
+- `hourly_rate`：每小时费率（十进制字符串，如 `"10.5"`、`"0.001"`），必须非负；金额按十进制精确计算，不产生二进制浮点误差。
+- `settlement_until`：结算截止时间（ISO 8601）。**早于最后一个有效事件时间时返回 `422`**（违规事件不推进有效时间基准），恰好相等时允许（末个区间退化为零长度并丢弃）。
+- 事件、`settlement_until` 与费率窗口的时间不得混用带时区与不带时区的时间（否则 `422`）；链本身存在状态机违规**不影响**试算接口返回 `200`，违规情况只体现在 `validation` 中。
+
+**请求体**
+
+```json
+{
+  "events": [
+    {"type": "seal",     "timestamp": "2026-09-19T08:00:00Z", "seal_id": "S001", "custodian": "Alice"},
+    {"type": "handover", "timestamp": "2026-09-19T12:00:00Z", "custodian": "Bob"}
+  ],
+  "settlement_until": "2026-09-19T20:00:00Z",
+  "rates": [
+    {
+      "custodian": "Alice",
+      "windows": [
+        {"effective_from": "2026-09-19T00:00:00Z", "effective_to": "2026-09-19T10:00:00Z", "hourly_rate": "10.5"},
+        {"effective_from": "2026-09-19T10:00:00Z", "effective_to": "2026-09-20T00:00:00Z", "hourly_rate": "12.00"}
+      ]
+    },
+    {
+      "custodian": "Bob",
+      "windows": [
+        {"effective_from": "2026-09-19T12:00:00Z", "effective_to": "2026-09-19T15:00:00Z", "hourly_rate": "20"}
+      ]
+    }
+  ]
+}
+```
+
+**响应示例**（对应上例：Alice `[08,10)` 按 10.5/小时计 21、`[10,12)` 按 12/小时计 24，小计 45.00；Bob `[12,15)` 按 20/小时计 60，`[15,20)` 无费率列入 unpriced；total = 45.00 + 60.00 = 105.00）
+
+```json
+{
+  "settlement_until": "2026-09-19T20:00:00Z",
+  "validation": {
+    "valid": true,
+    "sealed": true,
+    "final_custodian": "Bob",
+    "current_seal": "S001",
+    "events": [
+      {"index": 0, "type": "seal",     "status": "ok", "reason": null, "cross_chain_conflict": false},
+      {"index": 1, "type": "handover", "status": "ok", "reason": null, "cross_chain_conflict": false}
+    ],
+    "violations": []
+  },
+  "segments": [
+    {"custodian": "Alice", "start": "2026-09-19T08:00:00Z", "end": "2026-09-19T10:00:00Z",
+     "seconds": 7200.0, "hourly_rate": "10.5", "amount": "21", "custodian_event_index": 0},
+    {"custodian": "Alice", "start": "2026-09-19T10:00:00Z", "end": "2026-09-19T12:00:00Z",
+     "seconds": 7200.0, "hourly_rate": "12.00", "amount": "24", "custodian_event_index": 0},
+    {"custodian": "Bob", "start": "2026-09-19T12:00:00Z", "end": "2026-09-19T15:00:00Z",
+     "seconds": 10800.0, "hourly_rate": "20", "amount": "60", "custodian_event_index": 1}
+  ],
+  "unpriced": [
+    {"custodian": "Bob", "start": "2026-09-19T15:00:00Z", "end": "2026-09-19T20:00:00Z",
+     "seconds": 18000.0, "custodian_event_index": 1}
+  ],
+  "custodians": [
+    {"custodian": "Alice", "subtotal": "45.00"},
+    {"custodian": "Bob", "subtotal": "60.00"}
+  ],
+  "total": "105.00"
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `settlement_until` | 回显请求中的结算截止时间 |
+| `validation` | 现有单链校验器的原始结果（结构同 `/validate`），试算仅采用其中 `status=ok` 的 seal/reseal/handover |
+| `segments[]` | 有费率覆盖的计费分段（半开 `[start, end)`），按 (保管人首次出现顺序, 起点) 升序 |
+| `segments[].seconds` | 分段时长（秒），即 `end - start` |
+| `segments[].hourly_rate` | 该段适用的每小时费率（十进制原样回显） |
+| `segments[].amount` | 该段**未舍入**金额：`seconds / 3600 × hourly_rate`（十进制字符串，不做浮点运算） |
+| `segments[].custodian_event_index` | 开启该保管区间的有效事件在全链中的下标（从 0 开始） |
+| `unpriced[]` | 无任何生效费率窗口覆盖的分段（半开区间），字段同 `segments` 但不含费率 / 金额；按 (保管人首次出现顺序, 起点) 升序 |
+| `custodians[]` | 各保管人小计（分段金额精确求和后 `ROUND_HALF_UP` 到分），按保管人首次出现顺序排列；无正长度保管时段的保管人不出现 |
+| `total` | 全部保管人**已舍入小计**直接相加之和（不再二次舍入） |
+
+> 金额（`hourly_rate` / `amount` / `subtotal` / `total`）在 JSON 中均以**十进制字符串**返回，避免大金额或多位小数时丢失精度。逐段 `amount` 是未舍入值；结算以各保管人 `subtotal` 与 `total` 为准。
+
+### 保管计费试算接口示例调用
+
+```bash
+curl -s http://localhost:8000/api/v1/seal-chain/custody-fee-quote \
+  -H 'Content-Type: application/json' \
+  -d '{"events": [
+          {"type": "seal", "timestamp": "2026-09-19T08:00:00Z",
+           "seal_id": "S001", "custodian": "Alice"}
+        ],
+        "settlement_until": "2026-09-19T20:00:00Z",
+        "rates": [
+          {"custodian": "Alice", "windows": [
+            {"effective_from": "2026-09-19T08:00:00Z",
+             "effective_to": "2026-09-19T10:00:00Z", "hourly_rate": "10.5"},
+            {"effective_from": "2026-09-19T09:00:00Z",
+             "effective_to": "2026-09-19T12:00:00Z", "hourly_rate": "12"}
+          ]}
+        ]}'
+# Alice 的两个费率窗口正长度重叠：返回 422
+```
+
 > 服务默认监听宿主机 **8000** 端口（容器内固定 `0.0.0.0:8000`，可用 `HOST_PORT` 覆盖），以上示例中的 `http://localhost:8000` 即该端口。
 
 ## 本地开发与测试
@@ -1109,7 +1223,7 @@ uvicorn app.main:app --reload --port 8000
 ```
 app/
   main.py        # FastAPI 入口与路由
-  models.py      # 请求 / 响应模型（单链、批量、合并重建、开封暴露审计、交接计划审计、温控责任审计、分段校验、库存分配规划、污染传播溯源与保管容量并发审计）
+  models.py      # 请求 / 响应模型（单链、批量、合并重建、开封暴露审计、交接计划审计、温控责任审计、分段校验、库存分配规划、污染传播溯源、保管容量并发审计与保管计费试算）
   validator.py   # 单链状态机校验核心
   timeline.py    # 时间线公共层（status=ok 事件过滤并保留全链下标 / 半开区间 covered-gap 分割 / 时区可比性检查）
   batch.py       # 批量封签占用检查（跨链冲突）
@@ -1121,6 +1235,7 @@ app/
   allocation.py  # 封签库存分配规划（占用排除 / 候选边 / 全局最优分配动态规划）
   contamination.py # 污染传播溯源（保管人持有区间 / 接触识别 / 级联最早污染时刻与传播路径，复用 timeline 公共层）
   custody.py     # 保管容量并发审计（持有区间 / 扫描线同刻先结束后开始 / 超限段合并与保管人汇总，复用 timeline 公共层）
+  custody_fee.py # 保管计费试算（截至 settlement_until 的保管区间 / 按费率边界切分 / unpriced / 精确求和 ROUND_HALF_UP 到分，复用 timeline 公共层）
 tests/
   test_validator.py
   test_batch.py
@@ -1133,6 +1248,7 @@ tests/
   test_allocation.py
   test_contamination.py
   test_custody.py
+  test_custody_fee.py
 Dockerfile
 docker-compose.yml
 requirements.txt

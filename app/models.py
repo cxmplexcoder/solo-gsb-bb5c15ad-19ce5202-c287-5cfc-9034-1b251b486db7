@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import List, Optional
 
@@ -807,4 +808,117 @@ class CustodyCapacityAuditResponse(BaseModel):
         default_factory=list,
         description="按保管人字典序排列的超限秒数与并发峰值汇总；"
         "仅包含审计窗口内实际持有过链的保管人",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 保管计费试算（/api/v1/seal-chain/custody-fee-quote）
+# ---------------------------------------------------------------------------
+
+
+class CustodyRateWindow(BaseModel):
+    """单个保管人的一个生效费率窗口：半开区间 [effective_from, effective_to)。"""
+
+    effective_from: datetime = Field(description="费率生效起点（含）")
+    effective_to: datetime = Field(description="费率失效终点（不含）")
+    hourly_rate: Decimal = Field(
+        allow_inf_nan=False, ge=0, description="每小时费率（十进制，非负）"
+    )
+
+
+class CustodianRateSchedule(BaseModel):
+    """单个保管人的生效费率窗口集合：窗口须互不重叠（允许首尾相接）。"""
+
+    custodian: str = Field(min_length=1, description="保管人名称")
+    windows: List[CustodyRateWindow] = Field(
+        description="该保管人的生效费率窗口（半开 [effective_from, effective_to)）；"
+        "可乱序提供，但不得重叠（首尾相接允许）",
+    )
+
+
+class CustodyFeeQuoteRequest(BaseModel):
+    """保管计费试算请求：事件序列、结算截止时间与各保管人生效费率窗口。"""
+
+    events: List[Event] = Field(default_factory=list)
+    settlement_until: datetime = Field(
+        description="结算截止时间；末个保管区间延伸至此，不得早于最后一个有效事件时间"
+    )
+    rates: List[CustodianRateSchedule] = Field(
+        default_factory=list,
+        description="按保管人提供的生效费率窗口；custodian 不可重复，"
+        "同一保管人的窗口须互不重叠；未提供费率窗口的保管时段计入 unpriced",
+    )
+
+    @model_validator(mode="after")
+    def _custodian_must_be_unique(self) -> "CustodyFeeQuoteRequest":
+        seen: set[str] = set()
+        for schedule in self.rates:
+            if schedule.custodian in seen:
+                raise ValueError(f"保管人费率重复：{schedule.custodian}")
+            seen.add(schedule.custodian)
+        return self
+
+
+class PricedCustodySegment(BaseModel):
+    """一段命中生效费率窗口的计费分段（半开 [start, end)）。"""
+
+    custodian: str = Field(description="该段所属保管人")
+    start: datetime = Field(description="分段起点（含）")
+    end: datetime = Field(description="分段终点（不含）")
+    seconds: float = Field(description="分段时长（秒），等于 end - start")
+    hourly_rate: Decimal = Field(description="该段适用的每小时费率（十进制，未舍入回显）")
+    amount: Decimal = Field(
+        description="该段未舍入金额（十进制）：seconds / 3600 × hourly_rate"
+    )
+    custodian_event_index: int = Field(
+        description="开启该保管区间的有效事件下标（全链，从 0 开始）"
+    )
+
+
+class UnpricedCustodySegment(BaseModel):
+    """一段无任何生效费率窗口覆盖的未计费分段（半开 [start, end)）。"""
+
+    custodian: str = Field(description="该段所属保管人")
+    start: datetime = Field(description="分段起点（含）")
+    end: datetime = Field(description="分段终点（不含）")
+    seconds: float = Field(description="分段时长（秒），等于 end - start")
+    custodian_event_index: int = Field(
+        description="开启该保管区间的有效事件下标（全链，从 0 开始）"
+    )
+
+
+class CustodianFeeQuote(BaseModel):
+    """单个保管人的计费试算小计：分段精确求和后按 ROUND_HALF_UP 舍入到分。"""
+
+    custodian: str = Field(description="保管人")
+    subtotal: Decimal = Field(
+        description="该保管人全部分段金额精确求和后按 ROUND_HALF_UP 舍入到分的小计"
+    )
+
+
+class CustodyFeeQuoteResponse(BaseModel):
+    """保管计费试算响应：保留原单链校验结果，另附计费 / 未计费分段与小计。"""
+
+    settlement_until: datetime = Field(description="回显请求中的结算截止时间")
+    validation: ValidateResponse = Field(
+        description="现有单链校验器的原始结果；仅以其中 status=ok 的 seal/reseal/handover "
+        "生成截至 settlement_until 的保管区间"
+    )
+    segments: List[PricedCustodySegment] = Field(
+        default_factory=list,
+        description="有费率覆盖的计费分段（半开区间），按 (保管人首次出现顺序, 起点) 升序；"
+        "金额为未舍入值",
+    )
+    unpriced: List[UnpricedCustodySegment] = Field(
+        default_factory=list,
+        description="无生效费率窗口覆盖的未计费分段（半开区间），"
+        "按 (保管人首次出现顺序, 起点) 升序",
+    )
+    custodians: List[CustodianFeeQuote] = Field(
+        default_factory=list,
+        description="各保管人小计（分段金额精确求和后 ROUND_HALF_UP 到分），"
+        "按保管人首次出现顺序排列；无保管时段的保管人不出现",
+    )
+    total: Decimal = Field(
+        description="总金额：全部已舍入保管人小计直接相加（不再二次舍入）"
     )
