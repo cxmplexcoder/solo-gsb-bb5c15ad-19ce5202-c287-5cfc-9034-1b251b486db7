@@ -9,6 +9,7 @@ from .chunk import ChunkValidateError, validate_chunk
 from .contamination import ContaminationTraceError, trace_contamination
 from .custody import CustodyCapacityAuditError, audit_custody_capacity
 from .exposure import ExposureAuditError, audit_exposure
+from .fee import CustodyFeeQuoteError, quote_custody_fee
 from .handover import HandoverPlanAuditError, audit_handover_plan
 from .models import (
     AllocationPlanRequest,
@@ -21,6 +22,8 @@ from .models import (
     ContaminationTraceResponse,
     CustodyCapacityAuditRequest,
     CustodyCapacityAuditResponse,
+    CustodyFeeQuoteRequest,
+    CustodyFeeQuoteResponse,
     ExposureAuditRequest,
     ExposureAuditResponse,
     HandoverPlanAuditRequest,
@@ -39,7 +42,7 @@ from .validator import validate_events
 app = FastAPI(
     title="封签链校验 API",
     description="用于展品运输交接场景的封签链状态机校验服务",
-    version="1.9.0",
+    version="1.10.0",
 )
 
 
@@ -222,4 +225,26 @@ def custody_capacity_audit(
     try:
         return audit_custody_capacity(request)
     except CustodyCapacityAuditError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/v1/seal-chain/custody-fee-quote",
+    response_model=CustodyFeeQuoteResponse,
+    tags=["seal-chain"],
+    summary="保管计费试算：按保管人费率窗口对保管区间计费",
+)
+def custody_fee_quote(request: CustodyFeeQuoteRequest) -> CustodyFeeQuoteResponse:
+    """保留原单链校验结果；仅以其中 status=ok 的 seal/reseal/handover 生成截至
+    settlement_until 的保管人半开区间 [start,end)（末个区间延伸至
+    settlement_until，零长度区间丢弃）。请求按保管人提供互不重叠的生效费率
+    窗口（半开 [start,end)，允许乱序与首尾相接）与每小时十进制费率；将保管
+    区间按费率边界切分，逐段返回秒数、适用费率与未舍入金额
+    （hourly_rate × seconds / 3600，十进制精确计算），无覆盖费率的时段列入
+    unpriced。每位保管人的分段金额先精确求和，再按 ROUND_HALF_UP 舍入到分，
+    total 由已舍入小计相加。混用时区、保管人费率计划重复、同一保管人费率
+    窗口重叠或 settlement_until 早于最后一个有效事件时返回 422。"""
+    try:
+        return quote_custody_fee(request)
+    except CustodyFeeQuoteError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

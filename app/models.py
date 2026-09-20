@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import List, Optional
 
@@ -808,3 +809,112 @@ class CustodyCapacityAuditResponse(BaseModel):
         description="按保管人字典序排列的超限秒数与并发峰值汇总；"
         "仅包含审计窗口内实际持有过链的保管人",
     )
+
+
+# ---------------------------------------------------------------------------
+# 保管计费试算（/api/v1/seal-chain/custody-fee-quote）
+# ---------------------------------------------------------------------------
+
+
+class FeeRateWindow(BaseModel):
+    """生效费率窗口：半开区间 [start, end) 内适用同一每小时十进制费率。
+
+    start 必须严格早于 end；同一保管人的费率窗口互不重叠（允许首尾相接）。
+    """
+
+    start: datetime = Field(description="窗口起点（含）")
+    end: datetime = Field(description="窗口终点（不含）")
+    hourly_rate: Decimal = Field(
+        allow_inf_nan=False,
+        description="每小时费率（十进制；JSON 中以字符串表示以保证精度）",
+    )
+
+    @model_validator(mode="after")
+    def _start_before_end(self) -> "FeeRateWindow":
+        try:
+            start_before_end = self.start < self.end
+        except TypeError:
+            raise ValueError("窗口起止时间的时区信息不一致（不能混用带时区与不带时区的时间）")
+        if not start_before_end:
+            raise ValueError("费率窗口的 start 必须早于 end")
+        return self
+
+
+class CustodianRatePlan(BaseModel):
+    """单个保管人的费率计划：一组互不重叠的生效费率窗口。"""
+
+    custodian: str = Field(min_length=1, description="保管人名称，请求内不可重复")
+    windows: List[FeeRateWindow] = Field(
+        default_factory=list,
+        description="生效费率窗口（半开 [start, end)），互不重叠，允许乱序与首尾相接",
+    )
+
+
+class CustodyFeeQuoteRequest(BaseModel):
+    """保管计费试算请求：事件序列、结算截止时间与各保管人的费率计划。"""
+
+    events: List[Event] = Field(default_factory=list)
+    settlement_until: datetime = Field(
+        description="结算截止时间；末个保管区间延伸至此，不得早于最后一个有效事件时间"
+    )
+    rate_plans: List[CustodianRatePlan] = Field(
+        default_factory=list,
+        description="各保管人的费率计划；custodian 不可重复；"
+        "未给出计划的保管人，其保管时段全部列入 unpriced",
+    )
+
+
+class FeeSegment(BaseModel):
+    """一段已定价的半开保管区间 [start, end)：保管区间按费率边界切分后的计费段。"""
+
+    custodian: str = Field(description="保管人")
+    start: datetime = Field(description="分段起点（含）")
+    end: datetime = Field(description="分段终点（不含）")
+    seconds: float = Field(description="分段时长（秒），等于 end - start")
+    hourly_rate: Decimal = Field(description="该段适用的每小时费率（来自覆盖它的费率窗口）")
+    amount: Decimal = Field(
+        description="未舍入金额：hourly_rate × seconds / 3600，十进制精确计算，未舍入到分"
+    )
+
+
+class UnpricedSegment(BaseModel):
+    """一段未被任何费率窗口覆盖的半开保管区间 [start, end)（不计费）。"""
+
+    custodian: str = Field(description="保管人")
+    start: datetime = Field(description="分段起点（含）")
+    end: datetime = Field(description="分段终点（不含）")
+    seconds: float = Field(description="分段时长（秒），等于 end - start")
+
+
+class CustodianFeeSummary(BaseModel):
+    """单个保管人的费用小计：分段金额精确求和后按 ROUND_HALF_UP 舍入到分。"""
+
+    custodian: str = Field(description="保管人")
+    amount: Decimal = Field(
+        description="小计金额：该保管人全部分段金额精确求和后按 ROUND_HALF_UP 舍入到分；"
+        "仅有 unpriced 时段时为 0.00"
+    )
+
+
+class CustodyFeeQuoteResponse(BaseModel):
+    """保管计费试算响应：保留原单链校验结果，另附计费分段、未定价时段与小计。"""
+
+    settlement_until: datetime = Field(description="回显请求中的结算截止时间")
+    validation: ValidateResponse = Field(
+        description="现有单链校验器的原始结果；仅以其中 status=ok 的 seal/reseal/handover "
+        "生成保管区间"
+    )
+    segments: List[FeeSegment] = Field(
+        default_factory=list,
+        description="已定价分段（半开区间），按时间升序；保管区间在费率边界处被切分",
+    )
+    unpriced: List[UnpricedSegment] = Field(
+        default_factory=list,
+        description="无覆盖费率的未定价时段（半开区间），按时间升序",
+    )
+    custodians: List[CustodianFeeSummary] = Field(
+        default_factory=list,
+        description="按保管人的费用小计，按首次持有时间升序；"
+        "包含结算窗口内实际持有过展品的全部保管人",
+    )
+    total: Decimal = Field(description="总计：各保管人已舍入小计之和")
